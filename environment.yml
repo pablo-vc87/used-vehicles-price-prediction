@@ -1,0 +1,13 @@
+name: used-vehicles-price-prediction
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.26,<3
+  - pandas>=2.1,<3
+  - scikit-learn>=1.3,<2
+  - lightgbm>=4,<5
+  - catboost>=1.2,<2
+  - xgboost>=2,<4
+  - jupyterlab>=4,<5
+  - ipykernel>=6,<7
