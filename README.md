@@ -1,108 +1,278 @@
-# Used Vehicle Price Prediction (Rusty Bargain App)
+# Used Vehicle Price Prediction
 
-An end-to-end Machine Learning production pipeline that evaluates, benchmarks, and optimizes high-performance regression architectures to accurately predict used car market values. Built as a scalable core service for the *Rusty Bargain* mobile application.
+> Versión en español: [LEEME.md](LEEME.md)
 
----
+A regression project that predicts **the market value of used cars** from their technical specifications, for the valuation feature of a used-car app.
 
-## 📌 Project Overview & Goals
-Rusty Bargain is a used car marketplace developing an app to attract new customers by offering rapid, reliable valuation metrics. Users receive immediate market value estimations based on physical vehicle specifications, historic depreciation trends, and structural trim options.
-
-Commercial viability dictates a balanced optimizations strategy across three business pillars:
-1. **Prediction Quality:** Minimizing the Root Mean Squared Error (RMSE) to capture customer trust.
-2. **Prediction Speed:** Ensuring near-instantaneous, low-latency execution loops inside mobile endpoints.
-3. **Training Time:** Maintaining an efficient, light computational profile for continuous pipeline retraining with new real-time market data.
+The project cleans 354,369 car listings, builds a vehicle-age feature, and compares **Linear Regression, Random Forest, XGBoost, and LightGBM** on three criteria: prediction quality (RMSE), training time, and prediction time. The selected model, **LightGBM (400 trees, learning rate 0.05)**, achieved an **RMSE of 1,642.76 on validation** and **1,649.63 on the independent test set**, the lowest error of all models while training in seconds instead of minutes.
 
 ---
 
-## 📂 Project Structure
+# Business Context
+
+Rusty Bargain, a used-car marketplace, is building an app where users can quickly find out the market value of their car. The company cares about three things:
+
+| Criterion | Why it matters |
+| --- | --- |
+| **Prediction quality** | Fair, realistic valuations build user trust |
+| **Prediction speed** | The app must answer immediately |
+| **Training time** | The model should be easy to retrain with new listings |
+
+The model must predict one target:
+
+| Target | Description |
+| --- | --- |
+| `Price` | Listing price in euros |
+
+---
+
+# Key Concepts
+
+| Term | Meaning |
+| --- | --- |
+| Vehicle age | `2019 − RegistrationYear`; it represents depreciation more directly than the year itself |
+| One-Hot Encoding | Turns each category into a 0/1 column; needed by Random Forest, XGBoost, and Linear Regression |
+| Native categorical handling | LightGBM can split directly on `category` columns, without One-Hot Encoding |
+| Gradient boosting | Builds trees one after another, each correcting the errors of the previous ones (LightGBM, XGBoost) |
+| Baseline | A simple model (here, Linear Regression) used to check that the complex models add value |
+
+---
+
+# Evaluation Metric
+
+The main metric is the **Root Mean Squared Error (RMSE)**:
+
+$$
+\text{RMSE} = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2}
+$$
+
+RMSE is in the same unit as the price (euros) and penalizes large errors more than small ones, which matters because a very wrong valuation hurts user trust the most. **Training time** and **prediction time** were measured with `time.perf_counter()` for every model.
+
+---
+
+# Dataset
+
+| File | Rows | Columns | Description |
+| --- | ---: | ---: | --- |
+| `data/car_data.csv` | 354,369 | 16 | Used-car listings collected in March–April 2016 |
+
+| Column | Description |
+| --- | --- |
+| `Price` | Price in euros (target) |
+| `VehicleType` | Body type |
+| `RegistrationYear`, `RegistrationMonth` | Registration date |
+| `Gearbox` | Manual or automatic |
+| `Power` | Power (hp) |
+| `Model`, `Brand` | Model and brand |
+| `Mileage` | Mileage (km) |
+| `FuelType` | Fuel type |
+| `NotRepaired` | Whether the car has unrepaired damage |
+| `DateCrawled`, `DateCreated`, `LastSeen` | Dates related to the listing |
+| `NumberOfPictures`, `PostalCode` | Number of pictures and owner's postal code |
+
+**Data source.** The dataset was provided by **TripleTen** as part of its Data Science Bootcamp and is included in this repository for educational and reproducibility purposes.
+
+---
+
+# Project Workflow
+
 ```text
+Raw data (354,369 listings)
+            │
+            ▼
+1. Data preparation: missing values, out-of-range values, VehicleAge
+            │
+            ▼
+2. Split: 70% train / 15% validation / 15% test
+            │
+            ▼
+3. Model-specific preprocessing (imputation fitted on train)
+   ├── LightGBM: native categorical columns
+   ├── Random Forest and XGBoost: One-Hot Encoding
+   └── Linear Regression: One-Hot Encoding (drop_first) + StandardScaler
+            │
+            ▼
+4. Train and time each model with a small hyperparameter grid
+            │
+            ▼
+5. Evaluate the best model once on the test set
+```
+
+---
+
+# 1. Data Preparation
+
+## Missing Values
+
+| Column | Missing | Treatment |
+| --- | ---: | --- |
+| `NotRepaired` | 71,154 | `"unknown"` |
+| `VehicleType` | 37,490 | `"unknown"` |
+| `FuelType` | 32,895 | `"unknown"` |
+| `Gearbox` | 19,833 | `"unknown"` |
+| `Model` | 19,705 | `"unknown"` |
+
+108,555 rows (30.6%) had at least one missing value, so filling them with `"unknown"` kept the data instead of dropping almost a third of it.
+
+## Out-of-Range Values
+
+| Column | Problem | Treatment |
+| --- | --- | --- |
+| `Price` | 36,054 listings (10.2%) under €500, including 10,772 with a price of 0 | Rows removed, so the model does not learn from unrealistic targets |
+| `RegistrationYear` | Values from 1000 to 9999 | Years outside 1910–2019 set to missing and later imputed with the training median |
+| `Power` | 40,225 listings with 0 hp | Replaced with the median power |
+| `RegistrationMonth` | Month 0 | Treated as "unknown month" (0) |
+
+## Feature Engineering and Selection
+
+* **`VehicleAge` = 2019 − `RegistrationYear`**, and `RegistrationYear` was dropped.
+* Removed columns: `DateCrawled`, `DateCreated`, `LastSeen` (listing dates), `NumberOfPictures` (always 0), and `PostalCode`.
+* Final data: **318,315 rows** and **10 features** (6 categorical and 4 numeric).
+
+---
+
+# 2. Data Split and Preprocessing
+
+```text
+318,315 listings
+│
+├── 70% TRAIN ─────────→ 222,947 → model training
+├── 15% VALIDATION ────→  47,748 → model and hyperparameter selection
+└── 15% TEST ──────────→  47,620 → final evaluation (used only once)
+```
+
+The imputers, the One-Hot Encoder, and the scaler were **fitted on the training set only** and then applied to validation and test.
+
+| Model family | Input |
+| --- | --- |
+| LightGBM | Numeric columns imputed + categorical columns as `category` (10 features) |
+| Random Forest, XGBoost | Numeric columns imputed + One-Hot Encoding (317 features) |
+| Linear Regression | One-Hot Encoding with `drop_first` + `StandardScaler` (311 features) |
+
+---
+
+# 3. Modeling
+
+| Model | Configuration | Validation RMSE | Training time | Prediction time |
+| --- | --- | ---: | ---: | ---: |
+| **LightGBM** | `n_estimators=400, learning_rate=0.05` | **1,642.76** | 7 s | 0.72 s |
+| LightGBM | `n_estimators=200, learning_rate=0.1` | 1,647.50 | 3 s | 0.31 s |
+| XGBoost | `n_estimators=400, learning_rate=0.05, max_depth=8` | 1,655.91 | 911 s | 0.57 s |
+| XGBoost | `n_estimators=200, learning_rate=0.1, max_depth=6` | 1,715.73 | 346 s | 0.34 s |
+| Random Forest | `n_estimators=100, max_depth=15` | 1,746.21 | 123 s | 0.34 s |
+| Random Forest | `n_estimators=100, max_depth=10` | 1,969.91 | 101 s | 0.18 s |
+| Random Forest | `n_estimators=50, max_depth=10` | 1,972.17 | 53 s | 0.17 s |
+| Linear Regression (baseline) | Default | 2,852.67 | 8 s | 0.01 s |
+
+*Times from the notebook run; they change slightly between runs and machines. Prediction times are for the whole validation set (47,748 cars).*
+
+* **Every tree-based model clearly beat the baseline** (RMSE 2,853), so the non-linear relationships between features and price matter.
+* **LightGBM had the lowest error and was also among the fastest to train**: about 7 seconds, while XGBoost needed about 15 minutes to reach a slightly higher error.
+* Random Forest improved with more depth, but it stayed behind the boosting models.
+* **CatBoost** is included in the notebook but commented out, because it required more computing power than was available. In a separate run it reached an RMSE of about 1,700, which was not saved in the notebook.
+
+## Final Result
+
+The selected model was evaluated **once** on the test set:
+
+```text
+Model:            LightGBM (n_estimators=400, learning_rate=0.05)
+Validation RMSE:  1,642.76
+Test RMSE:        1,649.63
+Prediction time:  0.68 s for 47,620 cars
+```
+
+The test error is only 0.4% higher than the validation error, so the model generalizes well to new listings.
+
+---
+
+# Conclusions
+
+1. **Data quality required several decisions**: almost a third of the rows had missing values, 10% had unrealistic prices, and some registration years and power values were impossible.
+
+2. **Gradient boosting gave the best results.** LightGBM and XGBoost had the lowest errors, and Linear Regression was far behind.
+
+3. **LightGBM offered the best balance of the three business criteria**: the lowest RMSE, training in seconds, and fast predictions.
+
+4. **The result is stable**: the test RMSE (1,649.63) is almost the same as the validation RMSE (1,642.76).
+
+## Business Interpretation
+
+LightGBM can value a car almost instantly and can be retrained quickly as new listings arrive. An average error of about €1,650 should be presented to users as an approximate value, not as an exact price.
+
+## Limitations and Next Steps
+
+* **Registration years after 2016:** the listings were collected in 2016, but 14,425 cars (4%) have a registration year between 2017 and 2019, which is not possible. Limiting the range to 2016 and computing the age relative to the listing date would make `VehicleAge` more accurate.
+* **Power:** the 0-hp values were replaced with the median of the whole dataset before the split (a small data leak), and 302 values above 1,000 hp (up to 20,000) were not treated. The median should be computed on the training set only, and extreme values should be capped.
+* Tune LightGBM further (number of leaves, minimum samples per leaf) with cross-validation.
+* Run CatBoost with enough computing power and save its results.
+* Analyze feature importance to explain which characteristics drive the price.
+
+---
+
+# Project Structure
+
+```text
+used-vehicles-price-prediction/
+│
 ├── data/
-│   └── car_data.csv                       # Historical used vehicle listings database
+│   └── car_data.csv
+│
 ├── notebooks/
-│   └── used_vehicle_price_prediction.ipynb # EDA, data preparation pipelines, and model evaluation
+│   └── used_vehicle_price_prediction.ipynb
+│
 ├── src/
-│   └── funciones_personales.py             # Reusable helpers for missing-value analytics & profiling
-├── environment.yml                         # Production Conda environment manifest
-└── requirements.txt                        # Lightweight Pip environmental dependency definition
+│   └── funciones_personales.py
+│
+├── .gitignore
+├── environment.yml
+├── requirements.txt
+├── LEEME.md
+└── README.md
 ```
+
+`src/funciones_personales.py` contains helper functions to inspect missing values (`mostrar_nan`), train and time one model (`evaluar_modelo`), and test a list of hyperparameter combinations (`probar_hiperparametros`).
 
 ---
 
-## 🛠️ Data Preprocessing & Strategy
-To protect structural optimization phases from **Data Leakage**, all validation parameters were fitted solely on the training matrices before scaling data down the stream.
+# Installation
 
-* **Data Cleaning & Filtering:** Replaced structural missing categorical records with `'unknown'`. Filtered out anomalous registration parameters outside the historical 1910–2019 baseline. Replaced standard error indices (like engine power values at `0`) with validation medians. Dropped rows featuring unrealistic pricing markers under \$500 (approx. 10.17% of total records) to safeguard target distributions against non-functional synthetic rows.
-* **Feature Engineering:** Built a synthetic `VehicleAge` feature (`2019 - RegistrationYear`) to model physical economic depreciation maps explicitly, dropping the collinear registration attribute afterwards.
-* **Encoding Optimization:** Categorical values were segmented across dynamic processing tracks tailored to the target algorithms:
-  * **Ensemble Tree Parsers (LightGBM / CatBoost):** Handled via explicit internal category typing to leverage native split optimization algorithms.
-  * **Matrix Boosters (Random Forest / XGBoost):** Expanded using dense One-Hot Encoding framework schemas.
-  * **Parametric Estimators (Linear Regression Baseline):** Standardized using strict One-Hot maps with `drop='first'` coupled with a robust `StandardScaler` wrapper to eliminate collinear dependency matrices.
+INSTALLATION_PLACEHOLDER
 
 ---
 
-## 🚀 Model Comparison & Benchmarks
-All algorithms were trained on a fixed 70% data allocation split, optimized on a isolated 15% validation matrix, and locked against a remaining 15% testing tier (`random_state=54321`):
+# Technologies
 
-| Model | Hyperparameters / Configuration | Validation RMSE | Training Time (s) | Prediction Time (s) |
-| :--- | :--- | :---: | :---: | :---: |
-| **LightGBM** | `n_estimators=400, learning_rate=0.05` | **1642.75** | **10.21** | **0.70** |
-| LightGBM | `n_estimators=200, learning_rate=0.10` | 1647.50 | 6.53 | 0.38 |
-| XGBoost | `n_estimators=400, learning_rate=0.05, max_depth=8` | 1655.91 | 946.35 | 0.53 |
-| XGBoost | `n_estimators=200, learning_rate=0.10, max_depth=6` | 1715.73 | 354.31 | 0.32 |
-| Random Forest | `n_estimators=100, max_depth=15` | 1746.20 | 127.77 | 0.38 |
-| Random Forest | `n_estimators=100, max_depth=10` | 1969.91 | 100.71 | 0.20 |
-| Linear Regression | `Default (Baseline Model)` | 2852.66 | 7.85 | 0.01 |
-
-> *Note: CatBoost was profiled inside independent compute instances, yielding an approximate benchmark RMSE baseline of ~1700.*
+* Python
+* Pandas
+* NumPy
+* scikit-learn (Linear Regression, Random Forest, One-Hot Encoding, StandardScaler, SimpleImputer)
+* LightGBM
+* XGBoost
+* CatBoost
+* Jupyter Notebook
 
 ---
 
-## 🏆 Final Model Evaluation (Winner)
-**LightGBM** (`n_estimators=400, learning_rate=0.05, random_state=54321`) was deployed as the winning production candidate. It consistently outmatched alternative gradient tree architectures across execution speed, scaling footprint, and optimization performance.
+# Skills Demonstrated
 
-Final verification on the entirely unseen **Test Set**:
-* **Test RMSE:** `1649.62` (A negligible ~0.4% deviation from validation metrics, verifying zero overfit)
-* **Test Prediction Latency:** `0.67 seconds`
-
-### 💡 Core Takeaways
-* **Server Scalability:** While XGBoost achieved a comparable predictive boundary, it required **946.35 seconds (~15.7 minutes)** to converge. LightGBM reached an even lower error state in a mere **10.21 seconds**.
-* **Commercial Value:** The microsecond inference pipeline footprint guarantees stable response times for concurrent app operations while maintaining minimal infrastructure overhead costs.
+* Regression with tabular data
+* Data cleaning: missing values, out-of-range values, and unrealistic targets
+* Feature engineering (vehicle age)
+* Model-specific preprocessing (encoders and imputers fitted on the training set)
+* Comparison of Linear Regression, Random Forest, XGBoost, and LightGBM
+* Hyperparameter tuning
+* Measuring training and prediction time
+* Choosing a model by balancing accuracy and speed
 
 ---
 
-## 💻 Local Setup & Execution
+## Author
 
-Python 3.9 is the targeted environment configuration for cross-platform local reproducibility.
+**Pablo Andrés Vázquez Calva**
 
-### Option 1: Conda Environment Setup (Recommended)
-```bash
-# Clone repository and enter workspace
-cd rusty-bargain-predictor
+Data Scientist
 
-# Create environment from the environmental manifest
-conda env create -f environment.yml
+GitHub: https://github.com/pablo-vc87
 
-# Activate environment
-conda activate used-vehicles-price-prediction
-```
-
-### Option 2: Standalone Pip Virtual Environment
-```bash
-# Create and activate environment instance
-python -m venv .venv
-source .venv/bin/activate       # On Linux/macOS
-# .venv\Scripts\activate      # On Windows PowerShell
-
-# Standardize dependency framework
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-### Running the Evaluation Notebook
-Launch the runtime instance targeting the internal notebooks workspace root to ensure data parsing relative paths resolve properly:
-```bash
-jupyter lab --notebook-dir=notebooks
-```
-Open `used_vehicle_price_prediction.ipynb` and run the cells sequentially. 
-
-*Hardware Note: Running the dense `Random Forest` and `XGBoost` cross-validation loops can be highly resource-intensive on low-tier personal workstations; parameters inside those specific search blocks can be safely scaled down to accelerate verification if required.*
+LinkedIn: https://www.linkedin.com/in/pablo-avc/
